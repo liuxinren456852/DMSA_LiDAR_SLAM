@@ -2,13 +2,15 @@
 
 <launch>
 
-  
+
+
   <node name="dmsa_slam_ros" pkg="dmsa_slam_ros" type="dmsa_slam_ros" output="screen">
   <rosparam command="load" file="$(find dmsa_slam_ros)/config/slam_settings.yaml" />
-  <rosparam command="load" file="$(find dmsa_slam_ros)/config/custom.yaml" />
-</node>
+  <rosparam command="load" file="$(find dmsa_slam_ros)/config/newer_college_ouster_64.yaml" />
+  </node>
+  
+  <node pkg="rviz" type="rviz" name="rviz" args="-d $(find dmsa_slam_ros)/rviz/dmsa.rviz" />
 
-<node pkg="rviz" type="rviz" name="rviz" args="-d $(find dmsa_slam_ros)/rviz/dmsa.rviz" />
 
 
 </launch>

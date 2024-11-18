@@ -52,25 +52,31 @@ public:
     DmsaOptimizer<PointStampId> slidingWindowOptimizer;
     DmsaOptimizer<PointNormal> keyframeMapOptimizer;
 
+    PointCloud<PointStampId>::Ptr staticPoints;
+
     int maxOverlapKeyId = 0;
     float overlapRatio = 0.0f;
 
     OutputManagement Output;
 
-    DmsaSlam(Config &inputConf) : config(inputConf), currTraj(new ContinuousTrajectory()), oldTraj(new ContinuousTrajectory()), pcBuffer(new PointCloudBuffer())
+    DmsaSlam(Config &inputConf) : config(inputConf), currTraj(new ContinuousTrajectory()), oldTraj(new ContinuousTrajectory()), pcBuffer(new PointCloudBuffer()), staticPoints(new PointCloud<PointStampId>())
     {
         pcBuffer->init(config.n_clouds);
 
         KeyframeMap = MapManagement(config.last_n_keyframes_for_optim);
+
+        staticPoints->reserve(config.expected_max_num_static_pts);
 
         initConfig();
     }
 
-    DmsaSlam() : currTraj(new ContinuousTrajectory()), oldTraj(new ContinuousTrajectory()), pcBuffer(new PointCloudBuffer())
+    DmsaSlam() : currTraj(new ContinuousTrajectory()), oldTraj(new ContinuousTrajectory()), pcBuffer(new PointCloudBuffer()), staticPoints(new PointCloud<PointStampId>())
     {
         pcBuffer->init(config.n_clouds);
 
         KeyframeMap = MapManagement(config.last_n_keyframes_for_optim);
+
+        staticPoints->reserve(config.expected_max_num_static_pts);
 
         initConfig();
     }
@@ -87,13 +93,14 @@ public:
 
         optimSettingsMap.gauss_split = true;
         optimSettingsMap.num_iter = config.num_iter_keyframe_optim;
-        optimSettingsMap.max_step = 0.02;
-        optimSettingsMap.step_length_optim = 0.05;
+        optimSettingsMap.max_step = 0.01;
+        // optimSettingsMap.step_length_optim = 0.05;
         optimSettingsMap.decay_rate = config.decay_rate_key;
 
         optimSettingsMap.select_best_set = config.select_best_set_key;
         optimSettingsMap.min_num_gaussians = config.min_num_points_gauss_key;
-
+        optimSettingsMap.grid_size_1_factor = 1.5f;
+        optimSettingsMap.grid_size_1_factor = 2.0f;
     }
 
     void processImuMeasurements(Eigen::Vector3d &AccMeas, Eigen::Vector3d &AngVelMeas, double &stamp)
@@ -149,7 +156,10 @@ public:
 
         // INIT MAP
         if (KeyframeMap.isInitialized == false)
+        {
             initializeMap(*currTraj);
+            return;
+        }
 
         // add static points
         int minKeyframeId;
@@ -163,7 +173,7 @@ public:
         currTraj->removeStaticPoints();
 
         Ref<Vector3d> lastKeyframePos = KeyframeMap.keyframePoses.globalPoses.Translations.col(KeyframeMap.keyframeDataBuffer.getNumElements() - 1);
-        Ref<Vector3d> currPos = currTraj->SparsePoses.globalPoses.Translations.col(0);
+        Ref<Vector3d> currPos = currTraj->controlPoses.globalPoses.Translations.col(0);
 
         if (overlapRatio < config.min_overlap_new_keyframe || (currPos - lastKeyframePos).norm() > config.dist_new_keyframe)
         {
@@ -186,8 +196,8 @@ public:
             tmp.globalPoses.Translations.col(0) = KeyframeMap.keyframePoses.globalPoses.Translations.col(maxOverlapKeyId);
             tmp.globalPoses.Orientations.col(0) = KeyframeMap.keyframePoses.globalPoses.Orientations.col(maxOverlapKeyId);
 
-            tmp.globalPoses.Translations.col(1) = currTraj->SparsePoses.globalPoses.Translations.col(0);
-            tmp.globalPoses.Orientations.col(1) = currTraj->SparsePoses.globalPoses.Orientations.col(0);
+            tmp.globalPoses.Translations.col(1) = currTraj->controlPoses.globalPoses.Translations.col(0);
+            tmp.globalPoses.Orientations.col(1) = currTraj->controlPoses.globalPoses.Orientations.col(0);
 
             tmp.global2relative();
 
@@ -200,7 +210,7 @@ public:
 
     void savePoses(string result_dir)
     {
-        Output.saveDensePoses(KeyframeMap.keyframePoses,result_dir);
+        Output.saveDensePoses(KeyframeMap.keyframePoses, result_dir);
     }
 
 private:
@@ -226,10 +236,10 @@ private:
         allKeyframes.updatePosesFromSubmap(fromId, allKeyframes.keyframeDataBuffer.getNumElements() - 1, *currSubmap);
 
         // update curr trajectory
-        currTraj->SparsePoses.relativePoses.Translations.col(0) = allKeyframes.keyframePoses.globalPoses.Translations.col(allKeyframes.keyframeDataBuffer.getNumElements() - 1);
-        currTraj->SparsePoses.relativePoses.Orientations.col(0) = allKeyframes.keyframePoses.globalPoses.Orientations.col(allKeyframes.keyframeDataBuffer.getNumElements() - 1);
+        currTraj->controlPoses.relativePoses.Translations.col(0) = allKeyframes.keyframePoses.globalPoses.Translations.col(allKeyframes.keyframeDataBuffer.getNumElements() - 1);
+        currTraj->controlPoses.relativePoses.Orientations.col(0) = allKeyframes.keyframePoses.globalPoses.Orientations.col(allKeyframes.keyframeDataBuffer.getNumElements() - 1);
 
-        currTraj->SparsePoses.relative2global();
+        currTraj->controlPoses.relative2global();
     }
 
     void updateTimeManagement(PointCloudPlus::Ptr inputPc)
@@ -259,7 +269,7 @@ private:
     void addStaticPoints(ContinuousTrajectory &trajIn, int &keyframeId, float &overlapToStatic, int &minRelatedKeyId)
     {
 
-        Ref<Vector3d> currPos = trajIn.SparsePoses.globalPoses.Translations.col(0);
+        Ref<Vector3d> currPos = trajIn.controlPoses.globalPoses.Translations.col(0);
         Vector3f currPosf = currPos.cast<float>();
 
         keyframeId = 0;
@@ -267,15 +277,15 @@ private:
         int currOverlap;
         int maxOverlapKey = 0;
         minRelatedKeyId = -1;
-        PointCloud<PointStampId>::Ptr staticPoints(new PointCloud<PointStampId>());
 
-        PointCloud<PointNormal>::Ptr tmpPtr(new PointCloud<PointNormal>()), filteredPc(new PointCloud<PointNormal>());
+        PointCloud<PointNormal>::Ptr tmpPtr(new PointCloud<PointNormal>());
 
         PointStampId tmpPt;
         tmpPt.id = -1;
         tmpPt.stamp = -1000.0;
 
-        staticPoints->reserve(20000);
+        // reset static points
+        staticPoints->resize(0);
 
         KdTreeFLANN<PointStampId> kdtree;
 
@@ -287,12 +297,11 @@ private:
 
         float sqrdMaxDist = std::pow(1.0f * trajIn.minGridSize, 2);
 
-        for (int k = 0; k < KeyframeMap.keyframeDataBuffer.getNumElements(); ++k)
+        // get closest keyframes
+        std::vector<int> closestKeyIds = KeyframeMap.getClosestNIds(currPos,config.closest_k_keyframes_as_static_points);
+
+        for (int& k : closestKeyIds)
         {
-            if (k < KeyframeMap.keyframeDataBuffer.getNumElements() - config.oldest_k_keyframes_as_static_points)
-            {
-                continue;
-            }
 
             double distToKeyframe = (currPos - KeyframeMap.keyframePoses.globalPoses.Translations.col(k)).norm();
 
@@ -324,7 +333,7 @@ private:
                                 // update overlap
                                 ++currOverlap;
 
-                                if (minRelatedKeyId < 0)
+                                if (minRelatedKeyId < 0 || k < minRelatedKeyId)
                                     minRelatedKeyId = k;
                             }
                         }
@@ -421,7 +430,7 @@ private:
         // init trajectory
         bool useImuNow = config.use_imu && recievedImuData;
 
-        currTraj->initTraj(minStamp, maxStamp, config.num_control_points, useImuNow, config.dt_res);
+        currTraj->initTraj(minStamp, maxStamp, config.num_control_poses, useImuNow, config.dt_res);
 
         // deactivate imu usage for the whole sequence if there are no measurements before initialization
         if (submapIsInitialized == false && config.use_imu == true && recievedImuData == false)
@@ -459,7 +468,7 @@ private:
         {
             optimSettingsSlidingWindow.step_length_optim = config.alpha_sliding_window_no_imu;
             optimSettingsSlidingWindow.max_step = config.max_step_sliding_window_no_imu;
-            //optimSettingsSlidingWindow.decay_rate = 1.0;
+            // optimSettingsSlidingWindow.decay_rate = 1.0;
         }
     }
 
@@ -489,7 +498,7 @@ private:
         if (trajIn.validImuData)
             trajIn.getSubmapGravityEstimate(data.measuredGravity);
 
-        KeyframeMap.addKeyframe(trajIn.SparsePoses.globalPoses.Translations.col(0), trajIn.SparsePoses.globalPoses.Orientations.col(0), trajIn.t0, data);
+        KeyframeMap.addKeyframe(trajIn.controlPoses.globalPoses.Translations.col(0), trajIn.controlPoses.globalPoses.Orientations.col(0), trajIn.t0, data);
 
         Output.informAboutNewKeyframe();
     }
@@ -506,8 +515,8 @@ private:
 
         keyframeCloud_imu->resize(keyframeCloudFiltered->size());
 
-        Vector3f currWorldPose = trajIn.SparsePoses.globalPoses.Translations.col(0).cast<float>();
-        Matrix3f currRotInv = axang2rotm(trajIn.SparsePoses.globalPoses.Orientations.col(0)).transpose().cast<float>();
+        Vector3f currWorldPose = trajIn.controlPoses.globalPoses.Translations.col(0).cast<float>();
+        Matrix3f currRotInv = axang2rotm(trajIn.controlPoses.globalPoses.Orientations.col(0)).transpose().cast<float>();
 
         KeyframeData data;
 
@@ -531,7 +540,16 @@ private:
         if (trajIn.validImuData)
             trajIn.getSubmapGravityEstimate(data.measuredGravity);
 
-        std::cout << "Gravity estimation keyframe: " << (axang2rotm(trajIn.SparsePoses.globalPoses.Orientations.col(0)) * data.measuredGravity).transpose() << std::endl;
+        // check gravity plausability
+        if (std::abs(data.measuredGravity.norm() - KeyframeMap.gravity.norm()) < config.gravity_outlier_thresh)
+            data.gravityPlausible = true;
+        else
+            data.gravityPlausible = false;
+
+        if (trajIn.validImuData == true && data.gravityPlausible == false)
+            std::cout << "Discarded faulty gravity measurement . . . " << std::endl;
+
+        std::cout << "Gravity estimation keyframe: " << (axang2rotm(trajIn.controlPoses.globalPoses.Orientations.col(0)) * data.measuredGravity).transpose() << std::endl;
 
         // save oldest keyframe to output manager
         if (KeyframeMap.keyframeDataBuffer.isFull())
@@ -539,7 +557,7 @@ private:
             Output.addStaticKeyframePose(KeyframeMap.keyframePoses.globalPoses.Translations.col(0), KeyframeMap.keyframePoses.globalPoses.Orientations.col(0), KeyframeMap.keyframePoses.stamps(0));
         }
 
-        KeyframeMap.addKeyframe(trajIn.SparsePoses.globalPoses.Translations.col(0), trajIn.SparsePoses.globalPoses.Orientations.col(0), trajIn.t0, data);
+        KeyframeMap.addKeyframe(trajIn.controlPoses.globalPoses.Translations.col(0), trajIn.controlPoses.globalPoses.Orientations.col(0), trajIn.t0, data);
     }
 
     void updateNormals(PointCloud<PointNormal>::Ptr &cloud, Vector3d origin = Vector3d::Zero())
@@ -614,7 +632,8 @@ private:
         pcl::transformPointCloud(*filteredPc, *filteredPc, config.lidarToImuTform);
 
         // set padding variable to 1
-        for (auto & point : filteredPc->points) point.data[3] = 1.0f;
+        for (auto &point : filteredPc->points)
+            point.data[3] = 1.0f;
 
         if (pcBuffer->getNumUpdates() % 10 == 0)
             std::cerr << "Grid size preprocessing: " << filteredPc->gridSize << " / num points: " << filteredPc->size() << "\n";

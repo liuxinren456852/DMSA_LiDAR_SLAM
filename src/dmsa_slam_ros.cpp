@@ -106,14 +106,14 @@ dmsa_slam_ros::dmsa_slam_ros()
     nh.getParam("num_clouds_submap", config.n_clouds);
     std::cout << "num_clouds_submap: " << config.n_clouds << std::endl;
 
-    nh.getParam("numControlPoints", config.num_control_points);
-    std::cout << "numControlPoints: " << config.num_control_points << std::endl;
+    nh.getParam("num_control_poses", config.num_control_poses);
+    std::cout << "num_control_poses: " << config.num_control_poses << std::endl;
 
     nh.getParam("last_n_keyframes_for_optim", config.last_n_keyframes_for_optim);
     std::cout << "last_n_keyframes_for_optim: " << config.last_n_keyframes_for_optim << std::endl;
 
-    nh.getParam("oldest_k_keyframes_as_static_points", config.oldest_k_keyframes_as_static_points);
-    std::cout << "oldest_k_keyframes_as_static_points: " << config.oldest_k_keyframes_as_static_points << std::endl;
+    nh.getParam("closest_k_keyframes_as_static_points", config.closest_k_keyframes_as_static_points);
+    std::cout << "closest_k_keyframes_as_static_points: " << config.closest_k_keyframes_as_static_points << std::endl;
 
     nh.getParam("alpha_keyframe_optim", config.alpha_keyframe_optim);
     std::cout << "alpha_keyframe_optim: " << config.alpha_keyframe_optim << std::endl;
@@ -147,6 +147,13 @@ dmsa_slam_ros::dmsa_slam_ros()
 
     nh.getParam("dist_static_points_keyframe", config.dist_static_points_keyframe);
     std::cout << "dist_static_points_keyframe: " << config.dist_static_points_keyframe << std::endl;
+
+    nh.getParam("gravity_outlier_thresh", config.gravity_outlier_thresh);
+    std::cout << "gravity_outlier_thresh: " << config.gravity_outlier_thresh << std::endl;
+
+    bool acceleration_in_g = false;
+    nh.getParam("acceleration_in_g", acceleration_in_g);
+    std::cout << "acceleration_in_g: " << acceleration_in_g << std::endl;
 
     double sigma_gyr;
 
@@ -198,7 +205,7 @@ dmsa_slam_ros::dmsa_slam_ros()
         config.last_n_keyframes_for_optim = 5;
         config.num_iter_keyframe_optim = 1;
         config.num_iter_sliding_window_optim = 5;
-        config.num_control_points = 10;
+        config.num_control_poses = 10;
         config.use_imu = true;
         config.max_num_points_per_scan = 1000;
         config.minDistDS = 10.0;
@@ -222,6 +229,12 @@ dmsa_slam_ros::dmsa_slam_ros()
     pubSubmap = nh.advertise<sensor_msgs::PointCloud2>("/dmsa_slam/submap", 1);
     pubPose = nh.advertise<geometry_msgs::PoseStamped>("/dmsa_slam/pose", 1);
     pubTraj = nh.advertise<sensor_msgs::PointCloud2>("/dmsa_slam/traj", 1);
+
+    // livox imu acceleration scaling
+    if (acceleration_in_g)
+    {
+        accUnitScale = 9.81;
+    }
 
     DmsaSLAMObj = DmsaSlam(config);
 }
@@ -303,7 +316,7 @@ void dmsa_slam_ros::callbackImuData(const sensor_msgs::Imu::ConstPtr &msg)
 {
 
     // save measurements
-    Eigen::Vector3d accVec = Vector3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+    Eigen::Vector3d accVec = accUnitScale*Vector3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
     Eigen::Vector3d angVelVec = Vector3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
     double stamp = msg->header.stamp.toSec();
 
@@ -321,9 +334,9 @@ void dmsa_slam_ros::publishPointCloudsAndPose()
     PointCloud<PointXYZ> currPosition;
 
     currPosition.points.resize(1);
-    currPosition.points[0].x = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(0,0);
-    currPosition.points[0].y = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(1,0);
-    currPosition.points[0].z = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(2,0);
+    currPosition.points[0].x = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(0,0);
+    currPosition.points[0].y = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(1,0);
+    currPosition.points[0].z = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(2,0);
 
     pcl::toROSMsg(DmsaSLAMObj.currTraj->globalPoints, submapMsg);
     pcl::toROSMsg(currPosition, trajMsg);
@@ -336,11 +349,11 @@ void dmsa_slam_ros::publishPointCloudsAndPose()
 
     geometry_msgs::PoseStamped currPose;
 
-    currPose.pose.position.x = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(0,0);
-    currPose.pose.position.y = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(1,0);
-    currPose.pose.position.z = DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Translations(2,0);
+    currPose.pose.position.x = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(0,0);
+    currPose.pose.position.y = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(1,0);
+    currPose.pose.position.z = DmsaSLAMObj.currTraj->controlPoses.globalPoses.Translations(2,0);
 
-    Matrix3d R = axang2rotm(DmsaSLAMObj.currTraj->SparsePoses.globalPoses.Orientations.col(0));
+    Matrix3d R = axang2rotm(DmsaSLAMObj.currTraj->controlPoses.globalPoses.Orientations.col(0));
     Quaterniond q(R);
 
     currPose.pose.orientation.x = q.x();
@@ -436,6 +449,27 @@ void dmsa_slam_ros::callbackPointCloud(const sensor_msgs::PointCloud2::ConstPtr 
 
             newPC->at(k).stamp = stampMsg + static_cast<double>(tmpStampFloat);
             newPC->at(k).id = (int)ring_tmp;
+        }
+        else if (config.sensor == "livoxXYZRTLT_s")
+        {
+            // stamp and ring
+            memcpy(&tmpStampDouble, &msg->data[arrayPosition + msg->fields[6].offset], sizeof(double));
+
+            newPC->at(k).stamp = tmpStampDouble;
+
+            // add artificial ring index
+            newPC->at(k).id = k % 1000;
+        }
+        else if (config.sensor == "livoxXYZRTLT_ns")
+        {
+            // stamp and ring
+            memcpy(&tmpStampDouble, &msg->data[arrayPosition + msg->fields[6].offset], sizeof(double));
+
+            // multiply point stamp with 1e-9 to recieve correct stamp - this is a workaround since there is a bug in the livox2 driver
+            newPC->at(k).stamp = 1e-9 * tmpStampDouble;
+
+            // add artificial ring index
+            newPC->at(k).id = k % 1000;
         }
         else if (config.sensor == "unknown")
         {
